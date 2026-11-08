@@ -12,6 +12,7 @@ runs on the pipeline Space's ZeroGPU hardware.
 from datetime import datetime
 import io
 import json
+import os
 import tempfile
 import uuid
 
@@ -33,6 +34,10 @@ PIPELINE_VERSION = "yolo-v1_unet-v1_b4-v1"
 SEATABLE_SERVER_URL = st.secrets.get("SEATABLE_SERVER_URL") or "https://cloud.seatable.io"
 SEATABLE_API_TOKEN = st.secrets.get("SEATABLE_API_TOKEN")
 SEATABLE_TABLE_NAME = st.secrets.get("SEATABLE_TABLE_NAME") or "melanoma_predictions_template"
+
+# Hugging Face token: authenticated calls get a much larger ZeroGPU quota
+# than anonymous ones. Add HF_TOKEN to the Streamlit secrets.
+HF_TOKEN = st.secrets.get("HF_TOKEN")
 
 # ---------------------------------------------------------------------------
 # SeaTable
@@ -83,8 +88,8 @@ def log_to_seatable(image: Image.Image, result: dict):
 
 @st.cache_resource
 def get_gradio_client():
-    """Initializes and caches the Gradio client connection to the Space."""
-    return Client(SPACE_ID)
+    """Initializes and caches the authenticated Gradio client connection to the Space."""
+    return Client(SPACE_ID, hf_token=HF_TOKEN)
 
 
 def call_pipeline(image: Image.Image) -> dict:
@@ -100,15 +105,22 @@ def call_pipeline(image: Image.Image) -> dict:
         image_copy.save(tmp.name, format="JPEG")
         tmp_path = tmp.name
 
-    # Official SDK call handling ZeroGPU sessions and FileData structures automatically
-    raw_result = client.predict(
-        image=handle_file(tmp_path),
-        api_name="/predict"
-    )
+    try:
+        # Official SDK call handling ZeroGPU sessions and FileData structures automatically
+        raw_result = client.predict(
+            image=handle_file(tmp_path),
+            api_name="/predict"
+        )
+    finally:
+        # Always remove the temporary file, even if the call fails
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
 
     if isinstance(raw_result, str):
         return json.loads(raw_result)
-    
+
     return raw_result
 
 # ---------------------------------------------------------------------------
@@ -124,6 +136,12 @@ st.warning(
 
 st.title("Melanoma Detection Pipeline")
 st.write("Upload one or more close-up images of a skin lesion. Each one runs through YOLO detection → U-Net segmentation → EfficientNet-B4 classification.")
+
+if not HF_TOKEN:
+    st.info(
+        "No Hugging Face token configured — running with the small anonymous "
+        "ZeroGPU quota. Add HF_TOKEN to the app secrets for a higher limit."
+    )
 
 uploaded_files = st.file_uploader(
     "Choose image(s)", type=["jpg", "jpeg", "png"], accept_multiple_files=True
@@ -143,7 +161,13 @@ if uploaded_files:
                 try:
                     result = call_pipeline(image)
                 except Exception as e:
-                    st.error(f"Something went wrong: {e}")
+                    if "ZeroGPU" in str(e) or "quota" in str(e).lower():
+                        st.error(
+                            "The daily GPU quota has been exhausted. "
+                            "Please try again later."
+                        )
+                    else:
+                        st.error(f"Something went wrong: {e}")
                     continue
 
             if isinstance(result, dict) and result.get("error"):
