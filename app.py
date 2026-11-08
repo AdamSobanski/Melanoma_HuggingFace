@@ -89,7 +89,10 @@ def log_to_seatable(image: Image.Image, result: dict):
 @st.cache_resource
 def get_gradio_client():
     """Initializes and caches the authenticated Gradio client connection to the Space."""
-    return Client(SPACE_ID, hf_token=HF_TOKEN)
+    try:
+        return Client(SPACE_ID, token=HF_TOKEN)      # newer gradio_client
+    except TypeError:
+        return Client(SPACE_ID, hf_token=HF_TOKEN)   # older gradio_client
 
 
 def call_pipeline(image: Image.Image) -> dict:
